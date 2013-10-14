@@ -1,11 +1,13 @@
 import Control.DeepSeq
 import Control.Monad
+import Data.Function
 import Data.List
 import Data.Int
 import Data.Word
 import Debug.Trace
 import System.Environment
 
+import Options.Applicative
 import Data.Elf
 import Data.Dwarf
 import Data.Serialize.Get
@@ -51,8 +53,19 @@ enumerations dies = trace ("processing " ++ cu)
                    ]
         cu = name $ head (M.elems dies)
 
-main = do
-  [filename] <- getArgs
+dedupeEnumeration :: Enumeration -> Enumeration
+dedupeEnumeration (Enumeration name vals) = Enumeration name vals'
+  where vals' = nubBy ((==) `on` snd) vals
+
+options :: ParserInfo (Bool, String)
+options = info (helper <*> args)
+          (fullDesc <> progDesc "generate a C header file listing enums defined in FILE")
+  where args = (,)
+               <$> switch (long "dedupe" <>
+                           help "drop enumeration values equal to previous ones")
+               <*> argument str (metavar "FILE")
+
+main = execParser options >>= \(dedupe, filename) -> do
   elf <- fmap parseElf (B.readFile filename)
   let debugInfo = sectionData ".debug_info" elf
       debugAbbrev = sectionData ".debug_abbrev" elf
@@ -70,7 +83,9 @@ main = do
                          else new)
                        k v es
                      ) M.empty $
-              concatMap (enumerations . parseDwarf) debugInfoPieces
+              concatMap (maybeDedupe . enumerations . parseDwarf) debugInfoPieces
+                where maybeDedupe | dedupe = map dedupeEnumeration
+                                  | otherwise = id
   forM_ (M.assocs enums) $ \(name, vals) -> do
     putStrLn $ "enum " ++ name ++ " {"
     forM_ vals $ \(valname, valval) -> do
